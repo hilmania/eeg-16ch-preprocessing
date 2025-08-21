@@ -79,6 +79,10 @@ class EEGPreprocessor:
         # For wrapper method: indices selected offline
         self.precomputed_channel_indices = precomputed_channel_indices
 
+        # Track selection results for saving
+        self._last_variance_selection = None
+        self._last_byname_selection = None
+
         # Frequency bands for feature extraction
         self.freq_bands = {
             'delta': (0.5, 4),
@@ -144,6 +148,13 @@ class EEGPreprocessor:
 
         if method == 'by_name':
             idx = self._indices_from_channel_names(self.selected_channels_cfg, self.drop_channels_cfg)
+            if idx is not None:
+                # Store for later saving
+                self._last_byname_selection = {
+                    'indices': idx,
+                    'keep_channels': self.selected_channels_cfg,
+                    'drop_channels': self.drop_channels_cfg
+                }
             return idx
 
         if method == 'variance_topk':
@@ -164,6 +175,14 @@ class EEGPreprocessor:
                 print(f"   · Selected channels (top-{k} by {self.channel_selection_metric}): {sel_names}")
             else:
                 print(f"   · Selected channel indices (top-{k}): {indices.tolist()}")
+
+            # Store for later saving
+            self._last_variance_selection = {
+                'indices': indices,
+                'metric_values': ch_metric,
+                'k': k,
+                'metric': self.channel_selection_metric
+            }
             return indices
 
         if method == 'wrapper':
@@ -176,7 +195,49 @@ class EEGPreprocessor:
         print(f"⚠️  Unknown channel_selection_method: {self.channel_selection_method}. Skipping selection.")
         return None
 
-    # ---------------------- Wrapper selection utilities ----------------------
+    def save_channel_selection_info(self, output_path: Path, method: str, selected_indices: np.ndarray, additional_info: dict = None):
+        """
+        Save channel selection information to JSON file
+
+        Args:
+            output_path: Directory to save the selection info
+            method: Channel selection method used
+            selected_indices: Array of selected channel indices
+            additional_info: Additional parameters/info to save
+        """
+        import json
+        from datetime import datetime
+
+        if selected_indices is None or len(selected_indices) == 0:
+            return
+
+        selection_info = {
+            'method': method,
+            'indices': [int(i) for i in selected_indices.tolist()],
+            'names': [self.channel_names[i] for i in selected_indices] if self.channel_names and (selected_indices.max() < len(self.channel_names)) else None,
+            'selected_count': len(selected_indices),
+            'total_channels': self.channels,
+            'timestamp': datetime.now().isoformat(),
+            'description': f"Channel selection using {method} method"
+        }
+
+        if additional_info:
+            selection_info.update(additional_info)
+
+        filename = f'channel_selection_{method}.json'
+        sel_out = output_path / filename
+        output_path.mkdir(exist_ok=True)
+
+        with open(sel_out, 'w') as f:
+            json.dump(selection_info, f, indent=2)
+
+        print(f"💾 Saved {method} channel selection to: {sel_out}")
+        print(f"📄 Selection summary: {len(selected_indices)}/{self.channels} channels selected")
+        if self.channel_names and (selected_indices.max() < len(self.channel_names)):
+            names = [self.channel_names[i] for i in selected_indices]
+            print(f"📋 Selected channels: {names}")
+
+        return sel_out
     def _compute_simple_channel_features(self, X_data: np.ndarray) -> np.ndarray:
         """
         Compute fast per-channel features for wrapper selection.
@@ -769,8 +830,11 @@ def create_preprocessing_pipeline(dataset_path: str,
                     output_path.mkdir(exist_ok=True)
                     with open(sel_out, 'w') as f:
                         json.dump({
+                            'method': 'wrapper',
                             'indices': [int(i) for i in wrapper_indices.tolist()],
                             'names': [preprocessor.channel_names[i] for i in wrapper_indices] if preprocessor.channel_names and (wrapper_indices.max() < len(preprocessor.channel_names)) else None,
+                            'selected_count': len(wrapper_indices),
+                            'total_channels': preprocessor.channels,
                             'params': {
                                 'max_k': wrapper_max_k,
                                 'model': wrapper_model,
@@ -778,9 +842,11 @@ def create_preprocessing_pipeline(dataset_path: str,
                                 'cv': wrapper_cv,
                                 'max_files': wrapper_max_files,
                                 'max_segments_per_file': wrapper_max_segments_per_file
-                            }
+                            },
+                            'description': f"Wrapper-based channel selection using {wrapper_model} with {wrapper_cv}-fold CV and {wrapper_scoring} scoring"
                         }, f, indent=2)
                         print(f"💾 Saved wrapper selection to: {sel_out}")
+                        print(f"📄 Selection summary: {len(wrapper_indices)}/{preprocessor.channels} channels selected")
 
     # Process each split
     splits = ['train', 'dev', 'eval']
@@ -888,6 +954,28 @@ def create_preprocessing_pipeline(dataset_path: str,
 
     # Create summary report
     create_processing_summary(output_path, all_features, all_labels)
+
+    # Save channel selection results for non-wrapper methods
+    if channel_selection_method == 'variance_topk' and hasattr(preprocessor, '_last_variance_selection') and preprocessor._last_variance_selection:
+        sel_info = preprocessor._last_variance_selection
+        additional_info = {
+            'params': {
+                'k': sel_info['k'],
+                'metric': sel_info['metric']
+            },
+            'metric_values': {f"channel_{i}": float(val) for i, val in enumerate(sel_info['metric_values'])}
+        }
+        preprocessor.save_channel_selection_info(output_path, 'variance_topk', sel_info['indices'], additional_info)
+
+    elif channel_selection_method == 'by_name' and hasattr(preprocessor, '_last_byname_selection') and preprocessor._last_byname_selection:
+        sel_info = preprocessor._last_byname_selection
+        additional_info = {
+            'params': {
+                'keep_channels': sel_info['keep_channels'],
+                'drop_channels': sel_info['drop_channels']
+            }
+        }
+        preprocessor.save_channel_selection_info(output_path, 'by_name', sel_info['indices'], additional_info)
 
     print(f"\n✅ Preprocessing complete!")
     print(f"📁 Output saved to: {output_path}")
