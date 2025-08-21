@@ -23,14 +23,40 @@ def run_analysis():
         print(f"❌ Error in dataset analysis: {e}\n")
         return False
 
-def run_preprocessing():
+def run_preprocessing(args):
     """Run preprocessing pipeline"""
     print("🔧 STEP 2: Data Preprocessing")
     print("=" * 40)
 
     try:
-        from eeg_preprocessing import main as preprocess_main
-        preprocess_main()
+        from eeg_preprocessing import create_preprocessing_pipeline
+        dataset_path = str(Path(__file__).parent)
+        output_path = str(Path(dataset_path) / 'processed')
+
+        # Parse channels keep/drop from CLI (comma-separated)
+        selected_channels = args.channels_keep.split(',') if getattr(args, 'channels_keep', '') else None
+        drop_channels = args.channels_drop.split(',') if getattr(args, 'channels_drop', '') else None
+
+        create_preprocessing_pipeline(
+            dataset_path=dataset_path,
+            output_path=output_path,
+            apply_filters=True,
+            apply_ica=False,
+            extract_features=True,
+            normalize_features=True,
+            channel_selection_method=args.channel_selection_method,
+            selected_channels=selected_channels,
+            drop_channels=drop_channels,
+            channel_selection_k=args.channel_topk,
+            channel_selection_metric=args.channel_selection_metric,
+            apply_channel_selection_to_raw=args.apply_channel_selection_to_raw,
+            wrapper_max_k=args.wrapper_max_k,
+            wrapper_model=args.wrapper_model,
+            wrapper_scoring=args.wrapper_scoring,
+            wrapper_cv=args.wrapper_cv,
+            wrapper_max_files=args.wrapper_max_files,
+            wrapper_max_segments_per_file=args.wrapper_max_segments_per_file
+        )
         print("✅ Preprocessing completed successfully!\n")
         return True
     except Exception as e:
@@ -93,6 +119,28 @@ def run_preprocessing_visualization():
 
     except Exception as e:
         print(f"❌ Error in preprocessing visualization: {e}")
+        import traceback
+        traceback.print_exc()
+        print()
+        return False
+
+def run_comprehensive_analysis():
+    """Run comprehensive preprocessing analysis for entire dataset"""
+    print("📊 STEP 6: Comprehensive Preprocessing Analysis")
+    print("=" * 55)
+
+    try:
+        import matplotlib
+        matplotlib.use('Agg')  # Use non-interactive backend
+
+        from comprehensive_preprocessing_analysis import main as comprehensive_main
+        comprehensive_main()
+
+        print("✅ Comprehensive analysis completed successfully!")
+        return True
+
+    except Exception as e:
+        print(f"❌ Error in comprehensive analysis: {e}")
         import traceback
         traceback.print_exc()
         print()
@@ -165,6 +213,10 @@ def print_summary(results):
     if 'preprocessing_viz' in results and results['preprocessing_viz'] is not False:
         steps.append(("Preprocessing Comparison", results['preprocessing_viz']))
 
+    # Add comprehensive analysis if it was run
+    if 'comprehensive_analysis' in results and results['comprehensive_analysis'] is not False:
+        steps.append(("Comprehensive Analysis", results['comprehensive_analysis']))
+
     for step_name, success in steps:
         if success is not False:  # Only show steps that were actually run
             status = "✅ SUCCESS" if success else "❌ FAILED"
@@ -178,9 +230,10 @@ def print_summary(results):
         print("🎉 ALL STEPS COMPLETED SUCCESSFULLY!")
         print("\n📁 Check the following directories for results:")
         print("   - dataset_metadata.csv (dataset information)")
-        print("   - processed_data/ (preprocessed data and features)")
+        print("   - processed/ (preprocessed data and features)")
         print("   - analysis/ (visualizations and reports)")
         print("   - preprocessing_analysis/ (preprocessing comparisons)")
+        print("   - comprehensive_preprocessing_analysis/ (complete dataset analysis)")
     else:
         print("⚠️  SOME STEPS FAILED - Check error messages above")
 
@@ -199,8 +252,38 @@ def main():
                        help='Skip visualization step')
     parser.add_argument('--preprocessing-viz', action='store_true',
                        help='Create preprocessing comparison visualizations')
-    parser.add_argument('--step', choices=['analysis', 'preprocessing', 'classification', 'visualization', 'preprocessing-viz'],
+    parser.add_argument('--comprehensive-analysis', action='store_true',
+                       help='Create comprehensive preprocessing analysis for entire dataset')
+    parser.add_argument('--step', choices=['analysis', 'preprocessing', 'classification', 'visualization', 'preprocessing-viz', 'comprehensive-analysis'],
                        help='Run only a specific step')
+
+    # Channel selection options for preprocessing
+    parser.add_argument('--channel-selection-method', default='none', choices=['none', 'by_name', 'variance_topk', 'wrapper'],
+                       help='Channel selection method to apply during preprocessing')
+    parser.add_argument('--channels-keep', dest='channels_keep', default='',
+                       help='Comma-separated list of channel names to keep (for by_name)')
+    parser.add_argument('--channels-drop', dest='channels_drop', default='',
+                       help='Comma-separated list of channel names to drop (for by_name)')
+    parser.add_argument('--channel-topk', dest='channel_topk', type=int, default=None,
+                       help='Top-k channels to select (for variance_topk)')
+    parser.add_argument('--channel-selection-metric', default='variance', choices=['variance'],
+                       help='Metric used when selecting top-k channels')
+    parser.add_argument('--apply-channel-selection-to-raw', action='store_true',
+                       help='If set, save processed raw with only the selected channels')
+
+    # Wrapper selection options
+    parser.add_argument('--wrapper-max-k', type=int, default=8,
+                       help='Max number of channels to select with wrapper method')
+    parser.add_argument('--wrapper-model', choices=['logreg', 'rf'], default='logreg',
+                       help='Model used in wrapper evaluation')
+    parser.add_argument('--wrapper-scoring', default='roc_auc',
+                       help='Scoring metric for wrapper evaluation (e.g., roc_auc, accuracy)')
+    parser.add_argument('--wrapper-cv', type=int, default=3,
+                       help='CV folds for wrapper evaluation')
+    parser.add_argument('--wrapper-max-files', type=int, default=10,
+                       help='Max number of training files to sample for wrapper selection')
+    parser.add_argument('--wrapper-max-segments-per-file', type=int, default=200,
+                       help='Max segments per file to use in wrapper selection')
 
     args = parser.parse_args()
 
@@ -222,7 +305,8 @@ def main():
         'preprocessing': False,
         'classification': False,
         'visualization': False,
-        'preprocessing_viz': False
+        'preprocessing_viz': False,
+        'comprehensive_analysis': False
     }
 
     # Handle special case for preprocessing visualization
@@ -238,19 +322,34 @@ def main():
 
         return
 
+    # Handle special case for comprehensive analysis
+    if args.comprehensive_analysis:
+        print("📊 Running comprehensive preprocessing analysis only...")
+        results['comprehensive_analysis'] = run_comprehensive_analysis()
+
+        # Print results
+        if results['comprehensive_analysis']:
+            print("🎉 Comprehensive analysis completed successfully!")
+        else:
+            print("❌ Comprehensive analysis failed!")
+
+        return
+
     # Determine which steps to run
     if args.step:
         # Run only specific step
         if args.step == 'analysis':
             results['analysis'] = run_analysis()
         elif args.step == 'preprocessing':
-            results['preprocessing'] = run_preprocessing()
+            results['preprocessing'] = run_preprocessing(args)
         elif args.step == 'classification':
             results['classification'] = run_classification()
         elif args.step == 'visualization':
             results['visualization'] = run_visualization()
         elif args.step == 'preprocessing-viz':
             results['preprocessing_viz'] = run_preprocessing_visualization()
+        elif args.step == 'comprehensive-analysis':
+            results['comprehensive_analysis'] = run_comprehensive_analysis()
     else:
         # Run full pipeline with skip options
         if not args.skip_analysis:
@@ -260,7 +359,7 @@ def main():
             results['analysis'] = True  # Assume success if skipped
 
         if not args.skip_preprocessing and results['analysis']:
-            results['preprocessing'] = run_preprocessing()
+            results['preprocessing'] = run_preprocessing(args)
         elif args.skip_preprocessing:
             print("⏭️  Skipping preprocessing")
             results['preprocessing'] = True

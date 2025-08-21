@@ -48,8 +48,11 @@ class TUSZDatasetAnalyzer:
                     session_count += 1
                     session_id = session_dir.name
 
-                    tcp_ar_path = session_dir / "01_tcp_ar"
-                    if tcp_ar_path.exists():
+                    # Look for all tcp_ar folders (01_tcp_ar, 03_tcp_ar_a, etc.)
+                    tcp_ar_folders = [d for d in session_dir.iterdir()
+                                    if d.is_dir() and 'tcp_ar' in d.name]
+
+                    for tcp_ar_path in tcp_ar_folders:
                         for file in tcp_ar_path.iterdir():
                             if file.suffix == '.npy':
                                 file_count += 1

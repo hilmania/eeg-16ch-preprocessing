@@ -99,17 +99,67 @@ Sistem klasifikasi multi-model:
 - **Metrics**: Accuracy, Precision, Recall, F1-Score, AUC-ROC
 
 ### 4. `eeg_visualization.py`
-Utilities untuk visualisasi dan analisis:
-- Plot time series EEG
-- Frequency spectrum analysis
-- Spectrogram visualization
-- Seizure vs normal comparison
-- Feature importance plots
+Comprehensive visualization system:
+- **Raw EEG Plotting**: Time series visualization untuk multiple channels
+- **Frequency Analysis**: Power spectral density plots
+- **Spectrograms**: Time-frequency analysis
+- **Feature Visualization**: Feature importance dan distribution plots
+- **Classification Results**: Confusion matrix, ROC curves
+- **Preprocessing Comparison**: Raw vs processed signal comparison
 
-### 5. `run_pipeline.py`
-Script utama untuk menjalankan seluruh pipeline dengan opsi kustomisasi.
+### 5. `comprehensive_preprocessing_analysis.py` 🆕
+Advanced analysis untuk seluruh dataset:
+- **Global Statistics**: Aggregate analysis untuk semua segmen
+- **Frequency Domain**: Band power analysis across entire dataset
+- **Channel-wise Metrics**: SNR, noise reduction per channel
+- **Sample Visualization**: Representative seizure vs normal samples
+- **Quantitative Reports**: Comprehensive metrics dan improvements
 
-## 🔧 Konfigurasi
+### 6. `run_pipeline.py`
+Script orchestrator utama dengan berbagai options:
+- Full pipeline execution
+- Individual step execution
+- Skip options untuk debugging
+- Preprocessing visualization
+- **Comprehensive analysis** 🆕
+
+## � Advanced Analysis Options 🆕
+
+### Preprocessing Visualization
+Untuk melihat efek preprocessing pada sample data:
+
+```bash
+# Simple preprocessing comparison
+python run_pipeline.py --preprocessing-viz
+
+# Atau menggunakan step
+python run_pipeline.py --step preprocessing-viz
+```
+
+### Comprehensive Dataset Analysis 🌟
+Untuk analisis mendalam seluruh dataset:
+
+```bash
+# Comprehensive analysis untuk seluruh dataset
+python run_pipeline.py --comprehensive-analysis
+
+# Atau menggunakan step
+python run_pipeline.py --step comprehensive-analysis
+
+# Atau jalankan demo dengan penjelasan
+python demo_comprehensive_analysis.py
+```
+
+#### Output Comprehensive Analysis:
+1. **Statistical Analysis**: Global statistics raw vs processed
+2. **Frequency Analysis**: Band power comparison across all channels
+3. **Channel-wise Metrics**: SNR improvement, noise reduction per channel
+4. **Sample Comparisons**: Representative seizure vs normal time series
+5. **Noise Reduction Analysis**: Quantitative artifact removal metrics
+6. **Condition-specific Effects**: Preprocessing impact on seizure vs normal
+7. **Comprehensive Report**: Detailed markdown report with all metrics
+
+## �🔧 Konfigurasi
 
 ### Preprocessing Options
 Dalam `eeg_preprocessing.py`, Anda dapat mengatur:
@@ -136,7 +186,42 @@ classifier.run_complete_pipeline(
 )
 ```
 
-## 📊 Output Files
+## � Command Line Options
+
+### run_pipeline.py Options
+
+```bash
+# Basic usage
+python run_pipeline.py                    # Run full pipeline
+
+# Step-specific execution
+python run_pipeline.py --step analysis                    # Dataset analysis only
+python run_pipeline.py --step preprocessing               # Preprocessing only
+python run_pipeline.py --step classification              # Classification only
+python run_pipeline.py --step visualization               # Visualization only
+python run_pipeline.py --step preprocessing-viz           # Preprocessing comparison
+python run_pipeline.py --step comprehensive-analysis      # Full dataset analysis
+
+# Skip options
+python run_pipeline.py --skip-analysis          # Skip dataset analysis
+python run_pipeline.py --skip-preprocessing     # Skip preprocessing
+python run_pipeline.py --skip-classification    # Skip classification
+python run_pipeline.py --skip-visualization     # Skip visualization
+
+# Special analysis options
+python run_pipeline.py --preprocessing-viz         # Quick preprocessing comparison
+python run_pipeline.py --comprehensive-analysis    # Full dataset analysis
+```
+
+### Demo Scripts
+
+```bash
+# Interactive demos with explanations
+python demo_preprocessing_visualization.py      # Basic preprocessing demo
+python demo_comprehensive_analysis.py           # Advanced analysis demo
+```
+
+## �📊 Output Files
 
 ### Data Files
 - `dataset_metadata.csv`: Metadata lengkap dataset
@@ -156,6 +241,17 @@ classifier.run_complete_pipeline(
 - `raw_eeg_sample_*.png`: Contoh sinyal EEG mentah
 - `frequency_spectrum_*.png`: Analisis spektrum frekuensi
 - `seizure_vs_normal_comparison.png`: Perbandingan pola seizure vs normal
+
+### Preprocessing Analysis 🆕
+- `preprocessing_analysis/`: Basic preprocessing comparisons
+- `comprehensive_preprocessing_analysis/`: Advanced dataset-wide analysis
+  - `statistical_comparison_aggregate.png`: Global statistical comparison
+  - `frequency_comparison_aggregate.png`: Frequency band analysis
+  - `channel_wise_comparison.png`: Per-channel metrics (SNR, correlation)
+  - `timeseries_comparison_*.png`: Sample time series comparisons
+  - `noise_reduction_analysis_aggregate.png`: Noise reduction metrics
+  - `seizure_vs_normal_preprocessing.png`: Condition-specific analysis
+  - `comprehensive_preprocessing_report.md`: Detailed quantitative report
 
 ## 🧠 Feature Engineering
 

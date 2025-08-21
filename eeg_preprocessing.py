@@ -22,6 +22,10 @@ from scipy.fft import fft, fftfreq
 from sklearn.preprocessing import StandardScaler, RobustScaler
 from sklearn.decomposition import PCA, FastICA
 from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.model_selection import cross_val_score
+from sklearn.pipeline import make_pipeline
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
 
 # Plotting
 import matplotlib.pyplot as plt
@@ -35,7 +39,17 @@ class EEGPreprocessor:
     def __init__(self,
                  sampling_rate: int = 250,
                  channels: int = 16,
-                 segment_length: int = 1280):
+                 segment_length: int = 1280,
+                 # Channel selection config
+                 channel_names: Optional[List[str]] = None,
+                 channel_selection_method: str = 'none',  # 'none' | 'by_name' | 'variance_topk'
+                 selected_channels: Optional[List[str]] = None,
+                 drop_channels: Optional[List[str]] = None,
+                 channel_selection_k: Optional[int] = None,
+                 channel_selection_metric: str = 'variance',  # currently only 'variance'
+                 apply_channel_selection_to_raw: bool = False,
+                 # Wrapper selection config (optional)
+                 precomputed_channel_indices: Optional[np.ndarray] = None):
         """
         Initialize preprocessor
 
@@ -48,6 +62,22 @@ class EEGPreprocessor:
         self.channels = channels
         self.segment_length = segment_length
         self.duration = segment_length / sampling_rate  # Duration in seconds
+
+        # Channels meta
+        default_channel_names = ['Fp1', 'Fp2', 'F3', 'F4', 'C3', 'C4', 'P3', 'P4',
+                                 'O1', 'O2', 'F7', 'F8', 'T3', 'T4', 'T5', 'T6']
+        self.channel_names = channel_names if channel_names is not None else default_channel_names[:channels]
+
+        # Channel selection configuration
+        self.channel_selection_method = channel_selection_method
+        self.selected_channels_cfg = selected_channels
+        self.drop_channels_cfg = drop_channels
+        self.channel_selection_k = channel_selection_k
+        self.channel_selection_metric = channel_selection_metric
+        self.apply_channel_selection_to_raw = apply_channel_selection_to_raw
+        self._last_selected_indices = None
+        # For wrapper method: indices selected offline
+        self.precomputed_channel_indices = precomputed_channel_indices
 
         # Frequency bands for feature extraction
         self.freq_bands = {
@@ -62,6 +92,226 @@ class EEGPreprocessor:
         print(f"   - Sampling rate: {self.fs} Hz")
         print(f"   - Channels: {self.channels}")
         print(f"   - Segment length: {self.segment_length} samples ({self.duration:.1f}s)")
+        # Channel selection summary
+        if self.channel_selection_method != 'none':
+            print(f"   - Channel selection: {self.channel_selection_method}")
+            if self.channel_selection_method == 'by_name':
+                print(f"     · Keep: {self.selected_channels_cfg} | Drop: {self.drop_channels_cfg}")
+            if self.channel_selection_method == 'variance_topk':
+                print(f"     · Metric: {self.channel_selection_metric} | Top-k: {self.channel_selection_k}")
+            if self.channel_selection_method == 'wrapper':
+                print(f"     · Wrapper selection active (indices provided: {self.precomputed_channel_indices is not None})")
+            print(f"     · Apply to saved raw: {self.apply_channel_selection_to_raw}")
+
+    # ---------------------- Channel selection helpers ----------------------
+    def _indices_from_channel_names(self, keep: Optional[List[str]], drop: Optional[List[str]]) -> Optional[np.ndarray]:
+        """
+        Build channel indices from names to keep/drop based on self.channel_names.
+
+        Priority: if keep provided -> use keep; else if drop provided -> use all except drop; else None
+        """
+        if not self.channel_names:
+            return None
+        name_to_idx = {name: i for i, name in enumerate(self.channel_names)}
+
+        if keep:
+            valid = [name for name in keep if name in name_to_idx]
+            if len(valid) == 0:
+                print("⚠️  Channel selection by_name: no valid channel names found. Skipping selection.")
+                return None
+            return np.array([name_to_idx[name] for name in valid], dtype=int)
+
+        if drop:
+            drop_set = {name for name in drop if name in name_to_idx}
+            indices = [i for i, n in enumerate(self.channel_names) if n not in drop_set]
+            if len(indices) == 0:
+                print("⚠️  Channel selection by_name: dropping all channels is not allowed. Skipping selection.")
+                return None
+            return np.array(indices, dtype=int)
+
+        return None
+
+    def _select_channels_for_file(self, X_data: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Decide which channel indices to keep for the entire file (consistent across all segments).
+
+        X_data shape: (segments, channels, time_points)
+        Returns indices array or None if no selection.
+        """
+        method = (self.channel_selection_method or 'none').lower()
+        if method == 'none':
+            return None
+
+        if method == 'by_name':
+            idx = self._indices_from_channel_names(self.selected_channels_cfg, self.drop_channels_cfg)
+            return idx
+
+        if method == 'variance_topk':
+            k = self.channel_selection_k or self.channels
+            k = max(1, min(k, X_data.shape[1]))
+            # Compute per-channel metric across all segments/time
+            if self.channel_selection_metric == 'variance':
+                ch_var_per_segment = np.var(X_data, axis=2)  # (segments, channels)
+                ch_metric = np.mean(ch_var_per_segment, axis=0)  # (channels,)
+            else:
+                ch_var_per_segment = np.var(X_data, axis=2)
+                ch_metric = np.mean(ch_var_per_segment, axis=0)
+
+            indices = np.argsort(ch_metric)[-k:]
+            indices = np.sort(indices)
+            if self.channel_names and len(self.channel_names) >= indices.max() + 1:
+                sel_names = [self.channel_names[i] for i in indices]
+                print(f"   · Selected channels (top-{k} by {self.channel_selection_metric}): {sel_names}")
+            else:
+                print(f"   · Selected channel indices (top-{k}): {indices.tolist()}")
+            return indices
+
+        if method == 'wrapper':
+            # Use precomputed indices if provided
+            if self.precomputed_channel_indices is not None and len(self.precomputed_channel_indices) > 0:
+                return np.array(self.precomputed_channel_indices, dtype=int)
+            print("⚠️  Wrapper selection requested but no precomputed indices provided. Skipping selection.")
+            return None
+
+        print(f"⚠️  Unknown channel_selection_method: {self.channel_selection_method}. Skipping selection.")
+        return None
+
+    # ---------------------- Wrapper selection utilities ----------------------
+    def _compute_simple_channel_features(self, X_data: np.ndarray) -> np.ndarray:
+        """
+        Compute fast per-channel features for wrapper selection.
+
+        X_data: (segments, channels, time)
+        Returns: (segments, channels, f_dim)
+        """
+        segs, chs, T = X_data.shape
+        # Features: variance, mean abs, band powers (delta..gamma)
+        fdim = 2 + 5  # var, mean_abs, 5 bandpowers
+        out = np.zeros((segs, chs, fdim), dtype=np.float32)
+        # Welch params
+        nperseg = min(256, T)
+        for s in range(segs):
+            for c in range(chs):
+                x = X_data[s, c]
+                var = np.var(x)
+                mabs = np.mean(np.abs(x))
+                # Bandpowers via Welch
+                freqs, psd = signal.welch(x, fs=self.fs, nperseg=nperseg)
+                def band_power(blo, bhi):
+                    mask = (freqs >= blo) & (freqs < bhi)
+                    return np.trapz(psd[mask], freqs[mask]) if np.any(mask) else 0.0
+                bp = [
+                    band_power(0.5, 4),
+                    band_power(4, 8),
+                    band_power(8, 13),
+                    band_power(13, 30),
+                    band_power(30, 50)
+                ]
+                out[s, c, :] = np.array([var, mabs] + bp, dtype=np.float32)
+        return out
+
+    def _evaluate_channel_subset(self, F_chan: np.ndarray, y: np.ndarray, subset: List[int],
+                                 model: str = 'logreg', scoring: str = 'roc_auc', cv: int = 3) -> float:
+        """
+        Evaluate a subset of channels using cross-validation on simple features.
+        F_chan: (n_samples, channels, f_dim) aggregated across files
+        y: (n_samples,)
+        subset: list of channel indices
+        Returns mean CV score.
+        """
+        if len(subset) == 0:
+            return 0.0
+        X = F_chan[:, subset, :].reshape(F_chan.shape[0], -1)
+        # Choose model
+        if model == 'rf':
+            clf = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
+            pipe = clf  # RF ok without scaling
+        else:
+            clf = LogisticRegression(max_iter=1000, solver='liblinear', random_state=42)
+            pipe = make_pipeline(StandardScaler(with_mean=False), clf)
+        try:
+            scores = cross_val_score(pipe, X, y, cv=cv, scoring=scoring, n_jobs=-1)
+            return float(np.nanmean(scores))
+        except Exception:
+            # Fallback to accuracy if scoring fails
+            try:
+                scores = cross_val_score(pipe, X, y, cv=cv, scoring='accuracy', n_jobs=-1)
+                return float(np.nanmean(scores))
+            except Exception:
+                return 0.0
+
+    def select_channels_wrapper(self,
+                                train_files: List[Tuple[str, str]],
+                                max_k: int = 8,
+                                model: str = 'logreg',
+                                scoring: str = 'roc_auc',
+                                cv: int = 3,
+                                max_files: int = 10,
+                                max_segments_per_file: int = 200) -> np.ndarray:
+        """
+        Greedy forward wrapper selection on a subset of training data.
+        Returns selected channel indices.
+        """
+        sel_files = train_files[:max_files] if max_files else train_files
+        F_list = []
+        y_list = []
+        for x_path, y_path in sel_files:
+            try:
+                X = np.load(x_path)
+                y = np.load(y_path)
+                # Ensure shape (segments, channels, time)
+                if X.ndim == 3 and X.shape[0] == 36:
+                    pass
+                elif X.ndim == 2:
+                    X = X[np.newaxis, ...]
+                else:
+                    # Try to reshape (channels, time) repeated 36
+                    if X.shape[-1] == self.segment_length and X.shape[-2] == self.channels:
+                        X = X[np.newaxis, ...]
+                # Subsample segments
+                if max_segments_per_file and X.shape[0] > max_segments_per_file:
+                    X = X[:max_segments_per_file]
+                    y = y[:max_segments_per_file]
+                F = self._compute_simple_channel_features(X)  # (segs, ch, f)
+                F_list.append(F)
+                y_list.append(y)
+            except Exception as e:
+                print(f"    ⚠️  Skipping file for wrapper selection ({x_path}): {e}")
+                continue
+        if not F_list:
+            print("⚠️  No data collected for wrapper selection. Falling back to no selection.")
+            return np.array([], dtype=int)
+        F_all = np.concatenate(F_list, axis=0)
+        y_all = np.concatenate(y_list, axis=0)
+        # Ensure both classes exist
+        if len(np.unique(y_all)) < 2:
+            print("⚠️  Wrapper selection requires at least two classes. Skipping selection.")
+            return np.array([], dtype=int)
+
+        remaining = list(range(F_all.shape[1]))
+        selected: List[int] = []
+        best_score = -np.inf
+        while len(selected) < max_k and remaining:
+            best_candidate = None
+            best_candidate_score = best_score
+            for ch in remaining:
+                subset = selected + [ch]
+                score = self._evaluate_channel_subset(F_all, y_all, subset, model=model, scoring=scoring, cv=cv)
+                if score > best_candidate_score:
+                    best_candidate_score = score
+                    best_candidate = ch
+            if best_candidate is None or best_candidate_score <= best_score:
+                break  # No improvement
+            selected.append(best_candidate)
+            remaining.remove(best_candidate)
+            best_score = best_candidate_score
+            if self.channel_names and best_candidate < len(self.channel_names):
+                print(f"    ✓ Added channel {self.channel_names[best_candidate]} -> CV {best_score:.4f}")
+            else:
+                print(f"    ✓ Added channel idx {best_candidate} -> CV {best_score:.4f}")
+
+        print(f"  Wrapper selected {len(selected)} channels. Best CV score: {best_score if best_score>-np.inf else 0:.4f}")
+        return np.array(sorted(selected), dtype=int)
 
     def apply_bandpass_filter(self,
                             data: np.ndarray,
@@ -129,15 +379,19 @@ class EEGPreprocessor:
         Returns:
             Cleaned EEG data
         """
+        # Infer channel count from data to support channel selection
+        # data shape: (segments, channels, time_points)
+        channels_local = data.shape[1]
+        segments_local = data.shape[0]
         if n_components is None:
-            n_components = min(self.channels, data.shape[0])
+            n_components = min(channels_local, segments_local)
 
         # Reshape data for ICA (time_points, channels)
         original_shape = data.shape
-        reshaped_data = data.reshape(-1, self.channels)
+        reshaped_data = data.reshape(-1, channels_local)
 
         # Apply ICA
-        ica = FastICA(n_components=n_components, random_state=42)
+        ica = FastICA(n_components=min(n_components, channels_local), random_state=42)
         components = ica.fit_transform(reshaped_data)
 
         # Remove components with high variance (likely artifacts)
@@ -354,6 +608,16 @@ class EEGPreprocessor:
 
             segment_features = []
 
+            # Decide channel indices once per file (consistent across all segments)
+            ch_indices = self._select_channels_for_file(processed_data) if self.channel_selection_method != 'none' else None
+            if ch_indices is not None:
+                self._last_selected_indices = ch_indices
+                if self.channel_names and (ch_indices.max() < len(self.channel_names)):
+                    names = [self.channel_names[i] for i in ch_indices]
+                    print(f"  🔎 Channel selection active: keeping {len(ch_indices)} channels -> {names}")
+                else:
+                    print(f"  🔎 Channel selection active: keeping indices {ch_indices.tolist()}")
+
             for i in range(processed_data.shape[0]):
                 segment = processed_data[i]  # (channels, time_points)
 
@@ -364,11 +628,18 @@ class EEGPreprocessor:
                     # Notch filter for power line interference
                     segment = self.apply_notch_filter(segment)
 
+                # Apply channel selection to segment for features and optionally for saved raw
+                seg_for_features = segment
+                if ch_indices is not None:
+                    seg_for_features = segment[ch_indices, :]
+                    if self.apply_channel_selection_to_raw:
+                        segment = seg_for_features
+
                 processed_data[i] = segment
 
                 # Extract features if requested
                 if extract_features:
-                    features = self.extract_comprehensive_features(segment)
+                    features = self.extract_comprehensive_features(seg_for_features)
                     segment_features.append(features)
 
             # Apply ICA if requested (on all segments together)
@@ -387,7 +658,25 @@ def create_preprocessing_pipeline(dataset_path: str,
                                 apply_filters: bool = True,
                                 apply_ica: bool = False,
                                 extract_features: bool = True,
-                                normalize_features: bool = True):
+                                normalize_features: bool = True,
+                                # Channel selection options
+                                channel_selection_method: str = 'none',
+                                selected_channels: Optional[List[str]] = None,
+                                drop_channels: Optional[List[str]] = None,
+                                channel_selection_k: Optional[int] = None,
+                                channel_selection_metric: str = 'variance',
+                                apply_channel_selection_to_raw: bool = False,
+                                channel_names: Optional[List[str]] = None,
+                                channels: int = 16,
+                                sampling_rate: int = 250,
+                                segment_length: int = 1280,
+                                # Wrapper config
+                                wrapper_max_k: int = 8,
+                                wrapper_model: str = 'logreg',
+                                wrapper_scoring: str = 'roc_auc',
+                                wrapper_cv: int = 3,
+                                wrapper_max_files: int = 10,
+                                wrapper_max_segments_per_file: int = 200):
     """
     Create complete preprocessing pipeline for TUSZ dataset
 
@@ -397,7 +686,16 @@ def create_preprocessing_pipeline(dataset_path: str,
         apply_filters: Whether to apply filtering
         apply_ica: Whether to apply ICA
         extract_features: Whether to extract features
-        normalize_features: Whether to normalize features
+    normalize_features: Whether to normalize features
+    channel_selection_method: 'none' | 'by_name' | 'variance_topk'
+    selected_channels: list of channel names to keep (by_name)
+    drop_channels: list of channel names to drop (by_name)
+    channel_selection_k: top-k channels to select (variance_topk)
+    channel_selection_metric: metric for top-k (currently only 'variance')
+    apply_channel_selection_to_raw: if True, saved processed raw will have only selected channels
+    channel_names: channel name list (length == channels)
+    channels/sampling_rate/segment_length: preprocessor basics
+    Wrapper: wrapper_max_k, wrapper_model [logreg|rf], wrapper_scoring, wrapper_cv, wrapper_max_files, wrapper_max_segments_per_file
     """
 
     print("🔧 Starting EEG Preprocessing Pipeline")
@@ -407,8 +705,19 @@ def create_preprocessing_pipeline(dataset_path: str,
     output_path = Path(output_path)
     output_path.mkdir(exist_ok=True)
 
-    # Initialize preprocessor
-    preprocessor = EEGPreprocessor()
+    # Initialize preprocessor (may update precomputed indices later for wrapper)
+    preprocessor = EEGPreprocessor(
+        sampling_rate=sampling_rate,
+        channels=channels,
+        segment_length=segment_length,
+        channel_names=channel_names,
+        channel_selection_method=channel_selection_method,
+        selected_channels=selected_channels,
+        drop_channels=drop_channels,
+        channel_selection_k=channel_selection_k,
+        channel_selection_metric=channel_selection_metric,
+        apply_channel_selection_to_raw=apply_channel_selection_to_raw
+    )
 
     # Load metadata
     metadata_path = dataset_path / 'dataset_metadata.csv'
@@ -417,6 +726,61 @@ def create_preprocessing_pipeline(dataset_path: str,
     else:
         print("❌ Metadata file not found. Please run analyze_dataset.py first.")
         return
+
+    # If wrapper selection: compute once on TRAIN and reuse
+    wrapper_indices: Optional[np.ndarray] = None
+    if channel_selection_method == 'wrapper':
+        print("🧩 Running wrapper-based channel selection on TRAIN split...")
+        # Gather train file pairs
+        md = pd.read_csv(dataset_path / 'dataset_metadata.csv') if (dataset_path / 'dataset_metadata.csv').exists() else None
+        if md is None:
+            print("❌ Metadata file not found for wrapper selection.")
+        else:
+            split_data = md[md['split'] == 'train']
+            X_train_files = split_data[split_data['file_type'] == 'X']['file_path'].tolist()
+            y_train_files = split_data[split_data['file_type'] == 'y']['file_path'].tolist()
+            train_pairs = []
+            for xfp in X_train_files:
+                yfp = xfp.replace('_X.npy', '_y.npy')
+                if yfp in y_train_files:
+                    train_pairs.append((xfp, yfp))
+            if not train_pairs:
+                print("⚠️  No train file pairs for wrapper selection.")
+            else:
+                wrapper_indices = preprocessor.select_channels_wrapper(
+                    train_pairs,
+                    max_k=wrapper_max_k,
+                    model=wrapper_model,
+                    scoring=wrapper_scoring,
+                    cv=wrapper_cv,
+                    max_files=wrapper_max_files,
+                    max_segments_per_file=wrapper_max_segments_per_file,
+                )
+                if wrapper_indices is not None and len(wrapper_indices) > 0:
+                    preprocessor.precomputed_channel_indices = wrapper_indices
+                    if preprocessor.channel_names and (wrapper_indices.max() < len(preprocessor.channel_names)):
+                        names = [preprocessor.channel_names[i] for i in wrapper_indices]
+                        print(f"   → Wrapper selected channels: {names}")
+                    else:
+                        print(f"   → Wrapper selected channel indices: {wrapper_indices.tolist()}")
+                    # Save selection
+                    import json
+                    sel_out = output_path / 'channel_selection_wrapper.json'
+                    output_path.mkdir(exist_ok=True)
+                    with open(sel_out, 'w') as f:
+                        json.dump({
+                            'indices': [int(i) for i in wrapper_indices.tolist()],
+                            'names': [preprocessor.channel_names[i] for i in wrapper_indices] if preprocessor.channel_names and (wrapper_indices.max() < len(preprocessor.channel_names)) else None,
+                            'params': {
+                                'max_k': wrapper_max_k,
+                                'model': wrapper_model,
+                                'scoring': wrapper_scoring,
+                                'cv': wrapper_cv,
+                                'max_files': wrapper_max_files,
+                                'max_segments_per_file': wrapper_max_segments_per_file
+                            }
+                        }, f, indent=2)
+                        print(f"💾 Saved wrapper selection to: {sel_out}")
 
     # Process each split
     splits = ['train', 'dev', 'eval']
@@ -457,6 +821,10 @@ def create_preprocessing_pipeline(dataset_path: str,
                 y_data = np.load(y_file)
 
                 # Preprocess
+                # Ensure wrapper indices propagated (for non-train splits or after computation)
+                if channel_selection_method == 'wrapper' and wrapper_indices is not None:
+                    preprocessor.precomputed_channel_indices = wrapper_indices
+
                 processed_X, features = preprocessor.preprocess_single_file(
                     X_data,
                     apply_filters=apply_filters,
